@@ -14,6 +14,7 @@ import threading
 import time
 import signal
 from typing import Optional
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Add current directory to path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,25 @@ sys.path.insert(0, current_dir)
 # Import pipelines
 from LaunchPad.categorySearchPipeline import CategorySearchPipeline
 from LaunchPad.productExtractionPipeline import ProductExtractionPipeline
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler for health checks"""
+    
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = b'{"status":"ok","message":"Pipelines running"}'
+            self.wfile.write(response)
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Suppress health check logs
+        pass
 
 
 class PipelineManager:
@@ -45,6 +65,8 @@ class PipelineManager:
         # Threads for running pipelines
         self.category_thread: Optional[threading.Thread] = None
         self.product_thread: Optional[threading.Thread] = None
+        self.health_check_thread: Optional[threading.Thread] = None
+        self.health_server: Optional[HTTPServer] = None
         
         # Control flags
         self.running = False
@@ -79,6 +101,21 @@ class PipelineManager:
                 if self.running:
                     self.run_product_pipeline()
     
+    def run_health_check_server(self):
+        """Run HTTP health check server for Railway"""
+        try:
+            port = int(os.getenv("PORT", "8080"))
+            self.health_server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+            print(f"[*] Health check server started on port {port}")
+            print(f"[*] Health endpoint: http://0.0.0.0:{port}/health")
+            self.health_server.serve_forever()
+        except Exception as e:
+            print(f"\n[HEALTH SERVER] Error: {e}")
+            if self.running:
+                time.sleep(5)
+                if self.running:
+                    self.run_health_check_server()
+    
     def start(self):
         """Start both pipelines in separate threads"""
         print(f"\n{'='*80}")
@@ -109,7 +146,16 @@ class PipelineManager:
             daemon=True
         )
         self.product_thread.start()
-        print("[✓] Product Extraction Pipeline thread started\n")
+        print("[✓] Product Extraction Pipeline thread started")
+        
+        # Start health check server thread (for Railway)
+        self.health_check_thread = threading.Thread(
+            target=self.run_health_check_server,
+            name="HealthCheckServer",
+            daemon=True
+        )
+        self.health_check_thread.start()
+        print("[✓] Health check server started\n")
         
         print(f"{'='*80}")
         print("ALL PIPELINES RUNNING")
@@ -117,6 +163,7 @@ class PipelineManager:
         print("\n[INFO] Both pipelines are running concurrently:")
         print("  → Category Pipeline: Discovers new e-commerce sites & templates")
         print("  → Product Pipeline: Extracts products using saved templates")
+        print("  → Health Check: HTTP server responding on /health endpoint")
         print("\n[INFO] Press Ctrl+C to stop all pipelines\n")
         
         # Wait for threads (they run continuously)
@@ -141,6 +188,15 @@ class PipelineManager:
                     )
                     self.product_thread.start()
                 
+                if self.health_check_thread and not self.health_check_thread.is_alive():
+                    print("\n[!] Health check server thread died, restarting...")
+                    self.health_check_thread = threading.Thread(
+                        target=self.run_health_check_server,
+                        name="HealthCheckServer",
+                        daemon=True
+                    )
+                    self.health_check_thread.start()
+                
                 time.sleep(5)  # Check every 5 seconds
                 
         except KeyboardInterrupt:
@@ -153,6 +209,11 @@ class PipelineManager:
         print(f"{'='*80}\n")
         
         self.running = False
+        
+        # Stop health check server
+        if self.health_server:
+            print("[*] Stopping health check server...")
+            self.health_server.shutdown()
         
         print("[*] Waiting for pipelines to finish current operations...")
         time.sleep(2)
